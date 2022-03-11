@@ -1,0 +1,593 @@
+---
+title: "MYC-ITD in pAML"
+author: "Jenny Smith"
+date: "10/1/2021"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2017.12.20_MYC-ITD_1031"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+library(REDCapR)
+# library(keyring) #cannot install non-zero exit 
+
+getwd()
+```
+
+# Raw Counts
+
+```{r}
+genome  <- "GRCh37"
+```
+
+
+## GRCh37 
+
+```{r}
+if(genome=="GRCh37"){
+  grch37_files <- dir(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/BCCA_GRCh37_Ensembl_v69"),
+                      full.names=TRUE)
+  # grch37_files
+  
+  ##Counts 
+  grch37_cts_file <- grep("dupGenesRemoved_FractionalCounts", grch37_files,value=T)
+  
+  # cts_grch37 <- readRDS(file.path(grch37_cts_file))
+  # 
+  # gene_ids <- cts_grch37[,c(1:2)]
+  # cts_grch37 <- as.data.frame(cts_grch37)
+  # rownames(cts_grch37) <- cts_grch37$geneSymbol
+  # cts_grch37 <- cts_grch37[,-c(1:2)]
+
+  
+  ##TPM
+  grch37_TPM_file <- grep("dupGenesRemoved_TPM", grch37_files, value = T)
+  
+  TPM_grch37 <- readRDS(file.path(grch37_TPM_file))
+
+  gene_ids <- TPM_grch37[,c(1:2)]
+  TPM_grch37 <- as.data.frame(TPM_grch37)
+  rownames(TPM_grch37) <- TPM_grch37$geneSymbol
+  TPM_grch37 <- TPM_grch37[,-c(1:2)]
+
+  
+  ## 0531 TPM 
+  polyA_files <-  dir(grch37_files[grep("PolyA", grch37_files)], full.names = TRUE)
+  TPM_0531_grch37 <- read.csv(file.path(grep("AAML0531_dupGenesRemoved_TPM", polyA_files, value=T)))
+}
+```
+
+### Exon Level 
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+dim(sample_info)
+```
+
+```{bash, eval=FALSE}
+cd "$TARGET/RNA/mRNAseq/level3/exon/concat_matrices/2017July_BCCA_0531_1031_Concatenated_GRCh37_Illumina_data"
+DEST="$TARGET/RNA/mRNAseq/analysis/2017.12.20_MYC-ITD_1031/Expression_Data/"
+cat TARGET_AML_AAML1031_RNASeq_Exon_TPM.csv | head -1 > $DEST/TARGET_AML_AAML1031_RNASeq_MYC_Exon_TPM.csv
+cat TARGET_AML_AAML1031_RNASeq_Exon_TPM.csv | grep -E "ENSG00000136997" >> $DEST/TARGET_AML_AAML1031_RNASeq_MYC_Exon_TPM.csv
+```
+
+```{r}
+# This is the old format of the exon level counts. 
+# Needs to have colnames updated. ALSO, Needs to include the rare variants batch which  is in batch 2, likely on swift 
+exon_TPM_batch1 <- readr::read_csv("Expression_Data/TARGET_AML_AAML1031_RNASeq_MYC_Exon_TPM.csv")
+
+
+ID.map <- colnames(exon_TPM_batch1) %>%
+  data.frame(colnames=.) %>%
+  left_join(.,select(sample_info, Sample,PATIENT_ID_Original),
+            by=c("colnames"="PATIENT_ID_Original")) %>%
+  mutate_at(vars(Sample), ~ifelse(is.na(.), colnames, .))
+
+# filter(ID.map, is.na(Sample)) #OK
+
+#Update the column names
+colnames(exon_TPM_batch1) <- ID.map$Sample
+
+head(exon_TPM_batch1[,1:5])
+dim(exon_TPM_batch1) #3 1113
+```
+
+```{r}
+# #Alternative means of accessing the data-set on my local machine, but still takes WAY too long. 
+# # I think I need a DB and can filter by gene_symbol each time. but how to set it up?
+# library(aws.s3)
+# 
+# creds <- aws.signature::use_credentials(profile = "default")
+# Sys.setenv("AWS_ACCESS_KEY_ID" = creds$default$AWS_ACCESS_KEY_ID,
+#            "AWS_SECRET_ACCESS_KEY" = creds$default$AWS_SECRET_ACCESS_KEY,
+#            "AWS_DEFAULT_REGION"="us-west-2")
+# 
+# BUCKET="fh-pi-meshinchi-s-eco-public"
+# PREFIX="TARGET_AML/RNAseq_Illumina_Data/Expression"
+# 
+# expn_files <- get_bucket_df(bucket = BUCKET,
+#                         prefix = PREFIX,
+#                         max = Inf)
+# 
+# tictoc::tic()
+# #wayy to slow to use this procedure... like over 10 minutes and it still hasnt finished streaming in the data using read.csv()
+# #using fread() also does NOT accomplish this in a timely way. again > 10 minutes and still not loading. 
+# exon_cts <- aws.s3::s3read_using(FUN=data.table::fread,
+#                                  object=expn_files$Key,
+#                                  bucket=BUCKET)
+# tictoc::toc()
+# 
+# I may try to use save the Rdata files instead, but I am doubting that they will really be faster to load. 
+# # s3saveRDS()
+# # also an alternative: s3readRDS(object, bucket, ...)
+```
+
+
+#### 0531 
+
+* see `cat_0531_exon_level_expression.r` for details on how the data was concatenated
+
+```{r}
+exon_TPM_0531 <- readr::read_csv("Expression_Data/TARGET_AML_low_depth_0531_exon_TPM.csv", show_col_types = FALSE)
+exon_TPM_0531 <- exon_TPM_0531[,-1]
+
+head(exon_TPM_0531[,1:5])
+# dim(exon_TPM_0531)
+# table(apply(exon_TPM_0531[,-c(1:2)], 2, sum)) #all sum to 1 million
+```
+
+
+# ClinData
+
+```{r}
+# https://cran.r-project.org/web/packages/REDCapR/vignettes/workflow-read.html 
+project <- "MYC-ITD_in_AAML1031"
+
+
+if(project==""){
+  stop("Must include Projecy name!")
+  
+}else{
+  message(paste0("Project is: ",project))
+  current_cde_database <- paste("TARGET_AML_CDEs_For_Project",project, ".RDS", sep="_")
+  
+  if(file.exists(current_cde_database)){
+    print("Reading CDEs from Rdata object.")
+    merged <- readRDS(current_cde_database)
+      
+  }else{
+    print("Downloading CDEs from RedCap API.")
+    
+    path_credential <- file.path(HOME,".redcap")
+    project_id <- 1295
+  
+    credential  <- REDCapR::retrieve_credential_local(
+      path_credential = path_credential,
+      project_id = project_id)
+    
+    #takes about 30 sec to download. 
+    merged <- redcap_read(redcap_uri = credential$redcap_uri, 
+                          token = credential$token, 
+                          raw_or_label_headers = 'label')
+    if(merged$success){
+      message(paste("Saving file:", current_cde_database))
+      merged <- data.frame(merged$data, check.names=TRUE)
+      saveRDS(merged, current_cde_database)
+    }
+    
+    #Create a simple log file from the day the project starts
+    cat(c(paste("Date:", Sys.Date()),
+          paste("cts:", ls(pattern = "_cts_file")),
+          paste("tpm:", ls(pattern = "_TPM_file")), 
+          paste("CDE:", current_cde_database)),
+          sep = "\n", 
+          file = paste(project, Sys.Date(), ".log", sep="_"))
+    
+  }
+  
+  #keep a list of the ineligable patiens to remove if necessary
+  inelig <- merged %>% 
+    filter(Eligibility.Comments == "remove") %>% 
+    pull(USI)
+  
+  #Filter those with USIs and are eligible for the study
+  merged <- merged %>% 
+    filter(Eligibility.Comments != "remove")
+  
+  
+  dim(merged)
+  # head(merged)
+}
+```
+
+```{r}
+AAML1031_MYC <- read.csv("References/")
+
+head(AAML1031_MYC)
+```
+
+```{r}
+myc_cohort <- openxlsx::read.xlsx("References/MYC_ITD_list_of_positive_patients.xlsx") %>% 
+  left_join(., select(merged,USI, Protocol, Primary.Fusion), by="USI")
+
+head(myc_cohort)
+dim(myc_cohort)
+table(myc_cohort$Protocol)
+```
+
+```{r}
+table(myc_cohort$Primary.Fusion)
+
+18/24*100
+```
+
+# MYC-ITD by Fusion Callers
+
+```{r}
+TA_dirs <- dir(PROJHOME, pattern="TransA", ignore.case = T, full.names = T)
+# TA_dirs
+
+files <- lapply(TA_dirs, function(x) dir(x, pattern="ITD", full.names = TRUE, recursive = T)) %>% 
+  unlist() %>% 
+  .[!grepl("A_old", .)]
+
+
+transAbyss_MYC_ITD <- purrr::map_dfr(files, function(x){
+  print(x)
+  ta <- read.csv(x)
+  filter(ta, grepl("^MYC$", X5.gene), grepl("^MYC$", X3.gene))
+})
+
+
+dim(transAbyss_MYC_ITD) #34 39
+head(transAbyss_MYC_ITD)
+# View(transAbyss_MYC_ITD)
+```
+
+```{r}
+normals <- transAbyss_MYC_ITD %>% 
+  filter(grepl("R[0O]0.+", Patient)) %>% 
+  select(Patient, breakpoint, exons.introns, flanking_pairs,spanning_reads,breakpoint_pairs)
+
+# normals
+```
+
+```{r}
+transAbyss_MYC_ITD.clean <- transAbyss_MYC_ITD %>% 
+  select(Patient, Filename, everything(), -X) %>% 
+  mutate(Patient=ifelse(is.na(Patient), Filename, Patient)) %>% 
+  mutate(Breakpoint_in_Normal=ifelse(breakpoint %in% normals$breakpoint,"Yes","No")) %>% 
+  select(Patient, breakpoint,Breakpoint_in_Normal, everything(),-Filename)
+
+
+transAbyss_MYC_ITD.clean
+# write.csv(transAbyss_MYC_ITD.clean, "TransAbyss/TARGET_AML_TransAbyss_MYC-ITD_10.4.2021.csv", row.names=FALSE)
+length(unique(transAbyss_MYC_ITD.clean$Patient)) #24 samples
+# table(transAbyss_MYC_ITD.clean$Breakpoint_in_Normal)
+```
+
+```{r}
+myc.dedup <- transAbyss_MYC_ITD.clean %>% 
+  mutate(MYC.ITD.by.RNA="Yes") %>% 
+  select(Patient, exons.introns) %>% 
+  unique() %>% 
+  filter(grepl("3", exons.introns)) %>% 
+  arrange(exons.introns) 
+
+# any(duplicated(myc.dedup$Patient))
+```
+
+# Select Samples
+
+```{r}
+samples_0531 <- tibble(Patient=colnames(exon_TPM_0531)) %>% 
+  filter(!grepl("gene|exon", Patient)) %>% 
+  mutate(Sample=gsub("-",".", Patient),
+         USI=str_split_fixed(Patient, pattern = "-", n=5)[,3]) %>% 
+  left_join(., merged, by="USI") %>% 
+  left_join(., select(myc_cohort,USI, MYC.TD.by.DNA),
+            by=c("USI")) %>% 
+  mutate(MYC.ITD.by.DNA=ifelse(is.na(MYC.TD.by.DNA), "No", "Yes")) %>% 
+  arrange(desc(MYC.ITD.by.DNA)) %>% 
+  select(Patient:Protocol,MYC.ITD.by.DNA, MYC.TD.by.DNA, everything()) 
+
+
+head(samples_0531)
+# dim(samples_0531) #470 159
+# table(samples_0531$MYC.ITD.by.DNA)
+```
+
+```{r}
+samples_1031 <- sample_info %>% 
+  filter(grepl("dx", Batch)) %>%
+  filter(grepl("^AML$", Group) | Group == "NBM") %>%
+  filter(Sample %in% colnames(exon_TPM_batch1)) %>% 
+  
+  left_join(., select(myc_cohort, USI,MYC.TD.by.DNA), by="USI") %>%
+  # left_join(., select(myc_transAbyss, Sample, MYC.ITD.by.RNA=MYC.ITD,breakpoint,exons.introns),
+  #           by="Sample") %>% 
+  left_join(., myc.dedup, by=c("PATIENT_ID_Original"="Patient")) %>% 
+  mutate(MYC.ITD.by.RNA=ifelse(is.na(exons.introns), "No", "Yes")) %>% 
+  select(Sample:USI,MYC.TD.by.DNA,MYC.TD.by.DNA,  everything())
+  
+
+
+# samples_1031
+dim(samples_1031)
+# head(samples_1031)
+
+# table(samples_1031$MYC.TD.by.DNA)
+table(samples_1031$MYC.ITD.by.RNA)
+# table(duplicated(samples_1031$Sample))
+# table(samples_1031$Batch)
+
+table(samples_1031$MYC.ITD.by.RNA, samples_1031$AML_Subtype)
+```
+
+
+# Exon Expression 
+
+```{r}
+exon_expn_0531 <- 
+  exon_TPM_0531[grep("ENSG00000136997", exon_TPM_0531$gene_id), 
+           c("gene_id","exon_number",samples_0531$Patient)] %>% 
+  
+  pivot_longer(cols = matches("^TARGET"), 
+               names_to = "Patient",
+               values_to = "TPM") %>% 
+  
+  left_join(., select(samples_0531,USI,Patient,Sample, matches("MYC")),
+            by="Patient") %>% 
+  mutate(exon_number=as.factor(exon_number)) %>% 
+  arrange(desc(MYC.ITD.by.DNA),Sample) %>% 
+
+  
+  mutate(PTD_Exons=ifelse(exon_number == 3, TRUE, FALSE)) %>% 
+  mutate(
+         Patient=factor(Sample, levels=unique(Sample)),
+         log2_TPM=log2(TPM+1))
+  
+  # group_by(Sample) %>%
+  # mutate(p_value=wilcox.test(TPM ~ PTD_Exons, paired=FALSE, alternative = "greater", exact = FALSE)$p.value %>%
+  #          round(., digits = 3)) %>%
+  # ungroup()
+
+
+# exon_expn_0531
+```
+
+```{r}
+# exon_expn_1031 <- 
+#   exon_TPM_batch1[grep("ENSG00000136997", exon_TPM_batch1$geneSymbol), 
+#            c("gene_id","exon_number",samples_1031$Sample)] %>% 
+#   
+#   pivot_longer(cols = matches("^TARGET"), 
+#                names_to = "Sample",
+#                values_to = "TPM") %>% 
+#   
+#   left_join(., select(samples_0531,USI,Patient,Sample, matches("MYC")),
+#             by="Sample") %>% 
+#   mutate(exon=as.factor(exon)) %>% 
+#   mutate(MYC.=factor(KMT2A.PTD, 
+#                           levels=c("KMT2A-PTD", "AML", "NBM"))) %>% 
+#   arrange(KMT2A.PTD, Sample) %>% 
+#   
+#   mutate(PTD_Exons=ifelse(exon %in% ptd_exons$exon_number, TRUE, FALSE)) %>% 
+#   mutate(
+#         Patient=factor(Sample, levels=unique(Sample)),
+#          log2_TPM=log2(TPM+1),
+#          PTD_Exons=factor(PTD_Exons, levels=c("TRUE","FALSE"))) %>% 
+#   
+#   group_by(Sample) %>%
+#   mutate(p_value=wilcox.test(TPM ~ PTD_Exons, paired=FALSE, alternative = "greater", exact = FALSE)$p.value %>%
+#            round(., digits = 3)) %>%
+#   ungroup()
+# 
+# 
+# exon_expn
+```
+
+
+## Exon Expression Plots
+
+```{r fig.width=15, fig.height=7}
+myc_itd_plot <-  ggplot(exon_expn_0531, aes(x=exon_number, y=log2_TPM, fill=MYC.ITD.by.DNA)) +
+  geom_point(aes(color=MYC.ITD.by.DNA),
+             position = position_jitterdodge(jitter.width = 0.25),
+             alpha=0.6) +
+  geom_boxplot(alpha=0.25, aes(fill=MYC.ITD.by.DNA), color="black",
+               outlier.color = "orange",outlier.shape = 15, outlier.size =3)  +
+  theme_classic()
+
+
+myc_itd_plot
+# ggsave(plot = myc_itd_plot, filename = "TARGET_AML_MYC_ITD_Exon_Expression_0531_TPM.pdf", device = "pdf", height = 5, width = 15)
+```
+
+```{r}
+outlier.list <- exon_expn %>% 
+  filter(KMT2A.PTD=="AML") %>% 
+  filter(exon==8) %>% 
+  mutate(IQR=quantile(log2_TPM, probs = 0.75) -  quantile(log2_TPM, probs = 0.25)) %>% 
+  mutate(Outlier_in_Expression=case_when(
+    log2_TPM > (quantile(log2_TPM, probs = 0.25) + 1.5*IQR) ~ TRUE,
+    TRUE ~ FALSE)) %>% 
+  select(geneSymbol, exon, Sample,KMT2A.PTD, log2_TPM, IQR,Outlier_in_Expression, everything()) %>% 
+  arrange(desc(Outlier_in_Expression), desc(TPM))
+
+
+dim(outlier.list)
+table(outlier.list$Outlier_in_Expression)
+# table(outlier.list$KMT2A.PTD)
+
+# write.csv(outlier.list, "TARGET_AML_KMT2A-PTD_Exon8_Expression_Outliers_TPM.csv", row.names = FALSE)
+```
+
+```{r fig.width=25, fig.height=10}
+groups <- unique(exon_expn_0531$MYC.ITD.by.DNA)
+
+plots <- lapply(groups, function(group){
+  
+  input <- filter(exon_expn_0531, MYC.ITD.by.DNA == group) %>% 
+    mutate_at(vars(MYC.ITD.by.DNA), ~case_when(
+      .=="Yes" ~ "MYC-ITD+",
+      .=="No" ~ "MYC-ITD Negative")) %>% 
+    mutate(plotting_group="A")
+  
+  n_samp <- length(unique(input$Sample))
+  
+  if(n_samp > 25){
+    n_breaks <- ceiling(n_samp/25)
+    input <- input %>%
+      mutate(plotting_group=rep(LETTERS[1:19], each=3*25)[1:nrow(.)])
+  }
+  
+  ggplot(input, aes(x=reorder(Sample,log2_TPM), y=log2_TPM)) +
+    geom_col(alpha=0.5, aes(fill=exon_number),
+             position = position_dodge()) +
+    # geom_point(aes(color=exon_number),
+    #            position = position_jitterdodge(),
+    #            alpha=0.75, size=4) +
+    facet_wrap(~MYC.ITD.by.DNA+plotting_group, scales = "free", ncol=3) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1),
+          plot.margin = margin(l=4, b=2, unit="cm"))
+  #   
+})
+
+names(plots) <- groups
+# plots
+```
+
+```{r fig.height=5, fig.width=10}
+# plots$Yes
+# ggsave(plot=plots$Yes, filename = "TARGET_AML_MYC-ITD_positive_Exon_Expression.pdf", height = 5, width = 10)
+```
+
+```{r fig.width=20, fig.height=20}
+# ggsave(plot=plots$No,filename="TARGET_AML_MYC-ITD_negative_Exon_Expression.pdf", height = 25, width = 25)
+```
+
+## Heatmap
+
+```{r}
+# head(exon_expn)
+mat <- exon_expn %>%
+  mutate(gene=paste(geneSymbol, exon, sep="_")) %>% 
+  select(Sample, gene, log2_TPM) %>% 
+  pivot_wider(id_cols=gene, names_from=Sample, values_from=log2_TPM) %>% 
+  as.data.frame() %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix()
+
+anno_col <- exon_expn %>% 
+  select(Sample, AML_Subtype, KMT2A.PTD) %>% 
+  distinct() %>% 
+  column_to_rownames("Sample")
+
+anno_row <- exon_expn %>%
+  mutate(gene=paste(geneSymbol, exon, sep="_")) %>% 
+  select(gene, PTD_Exons) %>% 
+  distinct() %>% 
+  column_to_rownames("gene")
+
+
+dim(mat)
+# head(mat[,1:5])
+```
+
+```{r fig.height=10, fig.width=10}
+col <- len <- 299
+col <- colorRampPalette(c("black","white","red4"))(n=len)
+
+anno_colors <- list("PTD_Exons"=c("TRUE"="red","FALSE"="white"), 
+                    "KMT2A.PTD"=c("KMT2A-PTD"="red",AML="dodgerblue",NBM="grey"), 
+                    "AML_Subtype"=set_names(rainbow(12,s = 0.5),unique(anno_col$AML_Subtype)))
+
+pdf("TARGET_AML_KMT2A-PTD_Exon_Expression_Heatmap.pdf", height = 10, width = 15)
+pheatmap::pheatmap(mat=mat,
+                   col=col,
+                   scale = "column",
+                   clustering_method="complete",
+                   annotation_colors = anno_colors,
+                   annotation_row =  anno_row,
+                   annotation_col = anno_col ,
+                   show_colnames=FALSE, show_rownames = TRUE)
+
+dev.off()
+```
+
+
+# BCL2 Gene Expression 
+
+```{r}
+BCL2_0531 <- TPM_0531_grch37 %>% 
+  pivot_longer(cols=matches("[PB].+"), names_to="USI", values_to="TPM") %>% 
+  filter(grepl("^BCL2$", X)) %>% 
+  mutate(log2_TPM=log2(TPM+2)) %>% 
+  left_join(., samples_0531, by="USI") %>% 
+  mutate_at(vars(MYC.ITD.by.DNA, Group), ~case_when(
+    grepl("^BM", USI) ~ "NBM",
+    TRUE ~ .))  %>% 
+  filter(!is.na(MYC.ITD.by.DNA))
+
+
+# BCL2_0531
+table(BCL2_0531$MYC.ITD.by.DNA)
+```
+
+```{r}
+bcl2_expn_plot <- ggplot(BCL2_0531, aes(x=MYC.ITD.by.DNA, y=log2_TPM, fill=MYC.ITD.by.DNA)) +
+  geom_point(aes(color=MYC.ITD.by.DNA), position = position_jitter()) +
+  geom_violin(draw_quantiles = 0.5, alpha=0.25) +
+  ggpubr::stat_compare_means(method = "wilcox", comparisons = list(c("NBM","Yes"),
+                                                                   c("NBM","No"),
+                                                                   c("No","Yes"))) +
+  theme_classic()
+
+# ggsave(plot=bcl2_expn_plot,filename="TARGET_AML_0531_BCL2_expression_by_MYC-ITD.pdf", height = 5, width = 7)
+```
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
